@@ -25,36 +25,72 @@ export async function createSocketConnection(
  * @param url The url of the webpage to create socket connection
  * @param headers Your custom headers
  */
-export async function createConnection(
-    url: string,
-    headers: Record<string, string> = {}
-): Promise<Connection> {
+export async function createConnection(url: string, headers: Record<string, string> = {}): Promise<Connection> {
     const parsedURL = new URL(url);
     const { protocol, hostname, port } = parsedURL;
     let conn: Deno.Conn;
 
-    if(protocol == 'http:' || protocol == 'ws:') conn = await Deno.connect({ hostname, port: parseInt(port || '80') });
-    else if(protocol == 'https:' || protocol == 'wss:') conn = await Deno.connectTls({ hostname, port: parseInt(port || '443') });
-    else throw new Error('WS: Unknown protocol supplied to connect: ' + protocol);
+    if (protocol == 'http:' || protocol == 'ws:') {
+        conn = await Deno.connect({ hostname, port: parseInt(port || '80') });
+    } else if (protocol == 'https:' || protocol == 'wss:') {
+        conn = await Deno.connectTls({ hostname, port: parseInt(port || '443') });
+    } else {
+        throw new Error('WS: Unknown protocol supplied to connect: ' + protocol);
+    }
 
-    const writer = new BufWriter(conn);
-    const reader = new BufReader(conn);
     const headersObject = new Headers();
-    for(const header in headers) headersObject.set(header, headers[header]);
+    for (const header in headers) {
+        headersObject.set(header, headers[header]);
+    }
 
-    try{
-        await handshake(parsedURL, headersObject, reader, writer);
-    }catch(e){
+    const writableStream = new WritableStream({
+        write(chunk) {
+            return conn.write(chunk);
+        },
+        close() {
+            conn.close();
+        },
+        abort(err) {
+            console.error('Stream aborted:', err);
+            conn.close();
+        },
+    });
+
+    const readableStream = new ReadableStream({
+        start(controller) {
+            (async () => {
+                try {
+                    while (true) {
+                        const buffer = new Uint8Array(1024);
+                        const bytesRead = await conn.read(buffer);
+                        if (bytesRead === null) {
+                            break;
+                        }
+                        controller.enqueue(buffer.subarray(0, bytesRead));
+                    }
+                } catch (err) {
+                    console.error('Error reading from connection:', err);
+                } finally {
+                    controller.close();
+                    conn.close();
+                }
+            })();
+        }
+    });
+
+    try {
+        await handshake(parsedURL, headersObject, readableStream, writableStream);
+    } catch (e) {
         conn.close();
         throw e;
     }
 
     return {
         conn,
-        bufReader: reader,
-        bufWriter: writer,
-        mask: createMask()
-    }
+        readableStream,
+        writableStream,
+        mask: createMask() // Assuming createMask is defined elsewhere
+    };
 }
 
 /**
